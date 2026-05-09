@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 import os
 
-from hough_numba import hough_lines_numba
+from hough_numba.hough_numba import hough_lines_numba
 from image_utils import load_grayscale_image, compute_edges, draw_detected_lines
 
 

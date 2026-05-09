@@ -5,8 +5,9 @@ import os
 import numpy as np
 import cv2
 
-from hough_core import hough_lines_sequential
+from hough_sequential.hough_core import hough_lines_sequential
 from image_utils import load_grayscale_image, compute_edges, draw_detected_lines
+from hough_numba.hough_numba import hough_lines_numba
 
 
 class HoughGUI:
@@ -27,6 +28,27 @@ class HoughGUI:
             font=("Arial", 18, "bold")
         )
         title_label.pack(pady=15)
+
+        implementation_frame = tk.LabelFrame(
+            self.root,
+            text="Implementation",
+            padx=15,
+            pady=10
+        )
+        implementation_frame.pack(pady=10)
+
+        self.implementation_var = tk.StringVar()
+        self.implementation_var.set("Sequential")
+
+        implementation_menu = tk.OptionMenu(
+            implementation_frame,
+            self.implementation_var,
+            "Sequential",
+            "Numba Parallel"
+        )
+
+        implementation_menu.config(width=20)
+        implementation_menu.pack()
 
         self.path_label = tk.Label(
             self.root,
@@ -72,13 +94,21 @@ class HoughGUI:
 
         run_button = tk.Button(
             buttons_frame,
-            text="Run Sequential Hough",
+            text="Run Selected Implementation",
             width=25,
             bg="#2d89ef",
             fg="white",
             command=self.run_hough
         )
         run_button.grid(row=0, column=0, padx=10)
+
+        benchmark_button = tk.Button(
+            buttons_frame,
+            text="Benchmark Seq vs Numba",
+            width=22,
+            command=self.benchmark_seq_numba
+        )
+        benchmark_button.grid(row=1, column=0, columnspan=3, pady=10)
 
         clear_button = tk.Button(
             buttons_frame,
@@ -167,32 +197,52 @@ class HoughGUI:
             image = load_grayscale_image(self.image_path)
             edges = compute_edges(image)
 
-            start_time = time.perf_counter()
+            implementation = self.implementation_var.get()
 
-            accumulator, rhos, thetas = hough_lines_sequential(
-                edges,
-                rho_res=rho_res,
-                theta_res=theta_res
-            )
+            if implementation == "Sequential":
 
-            end_time = time.perf_counter()
+                start_time = time.perf_counter()
+
+                accumulator, rhos, thetas = hough_lines_sequential(
+                    edges,
+                    rho_res=rho_res,
+                    theta_res=theta_res
+                )
+
+                end_time = time.perf_counter()
+
+            elif implementation == "Numba Parallel":
+
+                # warm-up compilation
+                hough_lines_numba(edges, rho_res, theta_res)
+
+                start_time = time.perf_counter()
+
+                accumulator, rhos, thetas = hough_lines_numba(
+                    edges,
+                    rho_res,
+                    theta_res
+                )
+
+                end_time = time.perf_counter()
+
             execution_time = end_time - start_time
 
             result_image, detected_lines = draw_detected_lines(
-                image,
-                accumulator,
-                rhos,
-                thetas,
-                threshold
-            )
+                            image,
+                            accumulator,
+                            rhos,
+                            thetas,
+                            threshold
+          )
 
             os.makedirs("results", exist_ok=True)
 
-            output_path = os.path.join("results", "sequential_detected_lines.jpg")
+            output_path = os.path.join("results", f"{implementation.lower().replace(' ', '_')}_detected_lines.jpg")
             cv2.imwrite(output_path, result_image)
 
             result_text = (
-                f"Implementation: Sequential Hough\n"
+                f"Implementation: {implementation}\n"
                 f"Execution time: {execution_time:.6f} seconds\n"
                 f"Image size: {image.shape}\n"
                 f"Edge pixels: {np.count_nonzero(edges)}\n"
@@ -217,6 +267,73 @@ class HoughGUI:
 
         except Exception as error:
             messagebox.showerror("Execution error", str(error))
+    
+
+
+    def benchmark_seq_numba(self):
+        if self.image_path is None:
+            messagebox.showerror("Error", "Please select an image first.")
+            return
+
+        parameters = self.validate_parameters()
+
+        if parameters is None:
+            return
+
+        rho_res, theta_res, threshold = parameters
+
+        try:
+            image = load_grayscale_image(self.image_path)
+            edges = compute_edges(image)
+
+            # Numba warm-up
+            hough_lines_numba(edges, rho_res, theta_res)
+
+            start_seq = time.perf_counter()
+            seq_acc, seq_rhos, seq_thetas = hough_lines_sequential(
+                edges,
+                rho_res=rho_res,
+                theta_res=theta_res
+            )
+            end_seq = time.perf_counter()
+
+            start_numba = time.perf_counter()
+            numba_acc, numba_rhos, numba_thetas = hough_lines_numba(
+                edges,
+                rho_res,
+                theta_res
+            )
+            end_numba = time.perf_counter()
+
+            seq_time = end_seq - start_seq
+            numba_time = end_numba - start_numba
+
+            speedup = seq_time / numba_time if numba_time > 0 else 0
+            efficiency = speedup / os.cpu_count() if os.cpu_count() else 0
+
+            result_text = (
+                "Benchmark: Sequential vs Numba Parallel\n"
+                f"Image size: {image.shape}\n"
+                f"Edge pixels: {np.count_nonzero(edges)}\n"
+                f"Accumulator size: {seq_acc.shape}\n"
+                f"Rho resolution: {rho_res}\n"
+                f"Theta resolution: {np.rad2deg(theta_res):.2f} degrees\n"
+                f"Sequential time: {seq_time:.6f} seconds\n"
+                f"Numba time: {numba_time:.6f} seconds\n"
+                f"Speedup: {speedup:.2f}x\n"
+                f"Efficiency: {efficiency:.4f}\n"
+                f"CPU cores detected: {os.cpu_count()}"
+            )
+
+            self.result_text.config(state="normal")
+            self.result_text.delete("1.0", tk.END)
+            self.result_text.insert("1.0", result_text)
+            self.result_text.config(state="disabled")
+
+        except Exception as error:
+            messagebox.showerror("Benchmark error", str(error))
+
+
 
     def clear_results(self):
         self.result_text.config(state="normal")

@@ -3,8 +3,8 @@ import os
 import csv
 import numpy as np
 
-from hough_core import hough_lines_sequential
-from hough_numba import hough_lines_numba
+from hough_sequential.hough_core import hough_lines_sequential
+from hough_numba.hough_numba import hough_lines_numba
 from image_utils import load_grayscale_image, compute_edges
 
 
