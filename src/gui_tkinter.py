@@ -3,20 +3,23 @@ from tkinter import filedialog, messagebox
 import time
 import os
 import csv
+import threading
+
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 
 from hough_sequential.hough_core import hough_lines_sequential
-from image_utils import load_grayscale_image, compute_edges, draw_detected_lines
 from hough_numba.hough_numba import hough_lines_numba
+from image_utils import load_grayscale_image, compute_edges, draw_detected_lines
+from dataset_manager import DATASETS, download_limited_images, find_images_recursively
 
 
 class HoughGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Hough Transform - Line Detection")
-        self.root.geometry("850x750")
+        self.root.geometry("1050x850")
         self.root.resizable(True, True)
 
         self.image_path = None
@@ -51,6 +54,13 @@ class HoughGUI:
             value="Batch Folder"
         ).grid(row=0, column=1, padx=10)
 
+        tk.Radiobutton(
+            mode_frame,
+            text="Predefined Dataset Mode",
+            variable=self.mode_var,
+            value="Predefined Dataset"
+        ).grid(row=0, column=2, padx=10)
+
         implementation_frame = tk.LabelFrame(self.root, text="Implementation", padx=15, pady=10)
         implementation_frame.pack(pady=8)
 
@@ -67,9 +77,9 @@ class HoughGUI:
 
         self.path_label = tk.Label(
             self.root,
-            text="No image or folder selected",
+            text="No image, folder or dataset selected",
             fg="gray",
-            wraplength=760
+            wraplength=850
         )
         self.path_label.pack(pady=5)
 
@@ -89,6 +99,37 @@ class HoughGUI:
             width=22,
             command=self.select_folder
         ).grid(row=0, column=1, padx=10)
+
+        dataset_frame = tk.LabelFrame(
+            self.root,
+            text="Predefined Dataset",
+            padx=15,
+            pady=10
+        )
+        dataset_frame.pack(pady=8)
+
+        self.dataset_var = tk.StringVar(value=list(DATASETS.keys())[0])
+
+        dataset_menu = tk.OptionMenu(
+            dataset_frame,
+            self.dataset_var,
+            *DATASETS.keys()
+        )
+        dataset_menu.config(width=40)
+        dataset_menu.grid(row=0, column=0, padx=8, pady=5)
+
+        tk.Label(dataset_frame, text="Max images:").grid(row=0, column=1, padx=8)
+
+        self.max_images_entry = tk.Entry(dataset_frame, width=8)
+        self.max_images_entry.insert(0, "20")
+        self.max_images_entry.grid(row=0, column=2, padx=8)
+
+        tk.Button(
+            dataset_frame,
+            text="Download / Load Dataset",
+            width=22,
+            command=self.start_download_dataset_thread
+        ).grid(row=0, column=3, padx=8)
 
         params_frame = tk.LabelFrame(self.root, text="Hough Parameters", padx=15, pady=15)
         params_frame.pack(pady=8)
@@ -117,28 +158,28 @@ class HoughGUI:
             width=24,
             bg="#2d89ef",
             fg="white",
-            command=self.run_selected_mode
+            command=self.start_run_selected_mode_thread
         ).grid(row=0, column=0, padx=8, pady=5)
 
         tk.Button(
             buttons_frame,
             text="Benchmark Seq vs Numba",
             width=24,
-            command=self.benchmark_seq_numba_single
+            command=self.start_benchmark_thread
         ).grid(row=0, column=1, padx=8, pady=5)
 
         tk.Button(
             buttons_frame,
             text="Generate Comparison Chart",
             width=26,
-            command=self.generate_comparison_chart_single
+            command=self.start_chart_thread
         ).grid(row=0, column=2, padx=8, pady=5)
 
         tk.Button(
             buttons_frame,
             text="Batch Benchmark Folder",
             width=24,
-            command=self.batch_benchmark_folder
+            command=self.start_batch_benchmark_thread
         ).grid(row=1, column=0, padx=8, pady=5)
 
         tk.Button(
@@ -213,35 +254,136 @@ class HoughGUI:
             messagebox.showerror("Invalid parameters", str(error))
             return None
 
+    def get_max_images(self):
+        try:
+            max_images = int(self.max_images_entry.get())
+
+            if max_images <= 0:
+                raise ValueError
+
+            return max_images
+
+        except ValueError:
+            messagebox.showerror("Invalid value", "Max images must be a positive integer.")
+            return None
+
     def write_results(self, text):
         self.result_text.config(state="normal")
         self.result_text.delete("1.0", tk.END)
         self.result_text.insert("1.0", text)
         self.result_text.config(state="disabled")
 
+    def safe_write_results(self, text):
+        self.root.after(0, lambda: self.write_results(text))
+
+    def safe_message_info(self, title, message):
+        self.root.after(0, lambda: messagebox.showinfo(title, message))
+
+    def safe_message_error(self, title, message):
+        self.root.after(0, lambda: messagebox.showerror(title, message))
+
+    def start_thread(self, target):
+        thread = threading.Thread(target=target)
+        thread.daemon = True
+        thread.start()
+
+    def start_download_dataset_thread(self):
+        self.start_thread(self.download_predefined_dataset)
+
+    def start_run_selected_mode_thread(self):
+        self.start_thread(self.run_selected_mode)
+
+    def start_benchmark_thread(self):
+        self.start_thread(self.benchmark_current_mode)
+
+    def start_chart_thread(self):
+        self.start_thread(self.generate_chart_current_mode)
+
+    def start_batch_benchmark_thread(self):
+        self.start_thread(self.batch_benchmark_current_mode)
+
     def run_selected_mode(self):
         mode = self.mode_var.get()
 
         if mode == "Single Image":
             self.run_single_image()
+        elif mode in ["Batch Folder", "Predefined Dataset"]:
+            self.run_dataset_selected_implementation()
+
+    def benchmark_current_mode(self):
+        mode = self.mode_var.get()
+
+        if mode == "Single Image":
+            self.benchmark_single_image()
+        elif mode in ["Batch Folder", "Predefined Dataset"]:
+            self.benchmark_dataset()
+
+    def generate_chart_current_mode(self):
+        mode = self.mode_var.get()
+
+        if mode == "Single Image":
+            self.generate_single_image_chart()
+        elif mode in ["Batch Folder", "Predefined Dataset"]:
+            self.generate_dataset_chart()
+
+    def batch_benchmark_current_mode(self):
+        mode = self.mode_var.get()
+
+        if mode == "Single Image":
+            self.safe_message_error(
+                "Invalid mode",
+                "Batch Benchmark Folder works only in Batch Folder Mode or Predefined Dataset Mode."
+            )
+            return
+
+        self.benchmark_dataset()
+
+    def run_hough_algorithm(self, implementation, edges, rho_res, theta_res):
+        if implementation == "Sequential":
+            start_time = time.perf_counter()
+
+            accumulator, rhos, thetas = hough_lines_sequential(
+                edges,
+                rho_res=rho_res,
+                theta_res=theta_res
+            )
+
+            end_time = time.perf_counter()
+
+        elif implementation == "Numba Parallel":
+            hough_lines_numba(edges, rho_res, theta_res)
+
+            start_time = time.perf_counter()
+
+            accumulator, rhos, thetas = hough_lines_numba(
+                edges,
+                rho_res,
+                theta_res
+            )
+
+            end_time = time.perf_counter()
+
         else:
-            self.run_batch_selected_implementation()
+            raise ValueError("Unknown implementation selected.")
+
+        return accumulator, rhos, thetas, end_time - start_time
 
     def run_single_image(self):
         if self.image_path is None:
-            messagebox.showerror("Error", "Please select an image first.")
+            self.safe_message_error("Error", "Please select an image first.")
             return
 
         parameters = self.validate_parameters()
+
         if parameters is None:
             return
 
         rho_res, theta_res, threshold = parameters
+        implementation = self.implementation_var.get()
 
         try:
             image = load_grayscale_image(self.image_path)
             edges = compute_edges(image)
-            implementation = self.implementation_var.get()
 
             accumulator, rhos, thetas, execution_time = self.run_hough_algorithm(
                 implementation,
@@ -258,10 +400,11 @@ class HoughGUI:
                 threshold
             )
 
-            os.makedirs("results", exist_ok=True)
+            os.makedirs("results/single_image", exist_ok=True)
 
             output_name = f"{implementation.lower().replace(' ', '_')}_detected_lines.jpg"
-            output_path = os.path.join("results", output_name)
+            output_path = os.path.join("results", "single_image", output_name)
+
             cv2.imwrite(output_path, result_image)
 
             result_text = (
@@ -280,48 +423,134 @@ class HoughGUI:
                 f"Saved result: {output_path}"
             )
 
-            self.write_results(result_text)
-
-            messagebox.showinfo(
-                "Done",
-                f"Hough Transform completed.\n\nResult saved in:\n{output_path}"
-            )
+            self.safe_write_results(result_text)
+            self.safe_message_info("Done", f"Hough Transform completed.\n\nResult saved in:\n{output_path}")
 
         except Exception as error:
-            messagebox.showerror("Execution error", str(error))
+            self.safe_message_error("Execution error", str(error))
 
-    def run_hough_algorithm(self, implementation, edges, rho_res, theta_res):
-        if implementation == "Sequential":
-            start_time = time.perf_counter()
-            accumulator, rhos, thetas = hough_lines_sequential(
-                edges,
-                rho_res=rho_res,
-                theta_res=theta_res
+    def get_current_dataset_images(self):
+        if self.folder_path is None:
+            self.safe_message_error(
+                "Error",
+                "Please select a folder or download/load a predefined dataset first."
             )
-            end_time = time.perf_counter()
+            return None
 
-        elif implementation == "Numba Parallel":
-            hough_lines_numba(edges, rho_res, theta_res)
+        max_images = self.get_max_images()
 
-            start_time = time.perf_counter()
-            accumulator, rhos, thetas = hough_lines_numba(
-                edges,
-                rho_res,
-                theta_res
+        if max_images is None:
+            return None
+
+        image_files = find_images_recursively(self.folder_path)
+
+        if not image_files:
+            self.safe_message_error("Error", "No image files found.")
+            return None
+
+        return image_files[:max_images]
+
+    def run_dataset_selected_implementation(self):
+        parameters = self.validate_parameters()
+
+        if parameters is None:
+            return
+
+        image_files = self.get_current_dataset_images()
+
+        if image_files is None:
+            return
+
+        rho_res, theta_res, threshold = parameters
+        implementation = self.implementation_var.get()
+
+        results = []
+        output_dir = os.path.join("results", "dataset_outputs")
+        os.makedirs(output_dir, exist_ok=True)
+
+        try:
+            for index, image_path in enumerate(image_files, start=1):
+                self.safe_write_results(
+                    f"Processing dataset with {implementation}...\n"
+                    f"Image {index}/{len(image_files)}: {os.path.basename(image_path)}"
+                )
+
+                image = load_grayscale_image(image_path)
+                edges = compute_edges(image)
+
+                accumulator, rhos, thetas, execution_time = self.run_hough_algorithm(
+                    implementation,
+                    edges,
+                    rho_res,
+                    theta_res
+                )
+
+                result_image, detected_lines = draw_detected_lines(
+                    image,
+                    accumulator,
+                    rhos,
+                    thetas,
+                    threshold
+                )
+
+                output_name = (
+                    f"{os.path.splitext(os.path.basename(image_path))[0]}_"
+                    f"{implementation.lower().replace(' ', '_')}.jpg"
+                )
+
+                output_path = os.path.join(output_dir, output_name)
+                cv2.imwrite(output_path, result_image)
+
+                results.append({
+                    "image": os.path.basename(image_path),
+                    "implementation": implementation,
+                    "time": execution_time,
+                    "edge_pixels": int(np.count_nonzero(edges)),
+                    "height": image.shape[0],
+                    "width": image.shape[1],
+                    "accumulator_shape": str(accumulator.shape),
+                    "max_votes": int(accumulator.max()),
+                    "detected_lines": int(detected_lines),
+                    "output_path": output_path
+                })
+
+            csv_path = os.path.join("results", "dataset_selected_implementation.csv")
+            self.save_batch_csv(results, csv_path)
+
+            total_time = sum(item["time"] for item in results)
+            avg_time = total_time / len(results)
+
+            result_text = (
+                f"Mode: {self.mode_var.get()}\n"
+                f"Dataset processing completed.\n"
+                f"Implementation: {implementation}\n"
+                f"Images processed: {len(results)}\n"
+                f"Total execution time: {total_time:.6f} seconds\n"
+                f"Average execution time: {avg_time:.6f} seconds/image\n"
+                f"CSV saved: {csv_path}\n\n"
             )
-            end_time = time.perf_counter()
 
-        else:
-            raise ValueError("Unknown implementation selected.")
+            for item in results:
+                result_text += (
+                    f"{item['image']} | "
+                    f"time={item['time']:.6f}s | "
+                    f"edges={item['edge_pixels']} | "
+                    f"lines={item['detected_lines']}\n"
+                )
 
-        return accumulator, rhos, thetas, end_time - start_time
+            self.safe_write_results(result_text)
+            self.safe_message_info("Done", f"Dataset processing completed.\nCSV saved in:\n{csv_path}")
 
-    def benchmark_seq_numba_single(self):
+        except Exception as error:
+            self.safe_message_error("Dataset processing error", str(error))
+
+    def benchmark_single_image(self):
         if self.image_path is None:
-            messagebox.showerror("Error", "Please select an image first.")
+            self.safe_message_error("Error", "Please select an image first.")
             return
 
         parameters = self.validate_parameters()
+
         if parameters is None:
             return
 
@@ -338,7 +567,7 @@ class HoughGUI:
                 theta_res
             )
 
-            numba_acc, _, _, numba_time = self.run_hough_algorithm(
+            _, _, _, numba_time = self.run_hough_algorithm(
                 "Numba Parallel",
                 edges,
                 rho_res,
@@ -365,156 +594,32 @@ class HoughGUI:
                 f"CPU cores detected: {cpu_count}"
             )
 
-            self.write_results(result_text)
+            self.safe_write_results(result_text)
 
         except Exception as error:
-            messagebox.showerror("Benchmark error", str(error))
+            self.safe_message_error("Benchmark error", str(error))
 
-    def generate_comparison_chart_single(self):
-        if self.image_path is None:
-            messagebox.showerror("Error", "Please select an image first.")
-            return
-
+    def benchmark_dataset(self):
         parameters = self.validate_parameters()
+
         if parameters is None:
             return
 
-        rho_res, theta_res, threshold = parameters
+        image_files = self.get_current_dataset_images()
 
-        try:
-            image = load_grayscale_image(self.image_path)
-            edges = compute_edges(image)
-
-            _, _, _, seq_time = self.run_hough_algorithm(
-                "Sequential",
-                edges,
-                rho_res,
-                theta_res
-            )
-
-            _, _, _, numba_time = self.run_hough_algorithm(
-                "Numba Parallel",
-                edges,
-                rho_res,
-                theta_res
-            )
-
-            self.create_comparison_chart(
-                image_name=os.path.basename(self.image_path),
-                image_shape=image.shape,
-                edge_pixels=np.count_nonzero(edges),
-                seq_time=seq_time,
-                numba_time=numba_time,
-                output_path=os.path.join("results", "single_image_benchmark_comparison.png"),
-                show_chart=True
-            )
-
-        except Exception as error:
-            messagebox.showerror("Chart error", str(error))
-
-    def run_batch_selected_implementation(self):
-        if self.folder_path is None:
-            messagebox.showerror("Error", "Please select a folder first.")
-            return
-
-        parameters = self.validate_parameters()
-        if parameters is None:
+        if image_files is None:
             return
 
         rho_res, theta_res, threshold = parameters
-        implementation = self.implementation_var.get()
-
-        image_files = self.get_image_files(self.folder_path)
-
-        if not image_files:
-            messagebox.showerror("Error", "No image files found in selected folder.")
-            return
-
-        results = []
-
-        try:
-            os.makedirs("results/batch_outputs", exist_ok=True)
-
-            for image_path in image_files:
-                image = load_grayscale_image(image_path)
-                edges = compute_edges(image)
-
-                accumulator, rhos, thetas, execution_time = self.run_hough_algorithm(
-                    implementation,
-                    edges,
-                    rho_res,
-                    theta_res
-                )
-
-                result_image, detected_lines = draw_detected_lines(
-                    image,
-                    accumulator,
-                    rhos,
-                    thetas,
-                    threshold
-                )
-
-                output_name = (
-                    f"{os.path.splitext(os.path.basename(image_path))[0]}_"
-                    f"{implementation.lower().replace(' ', '_')}.jpg"
-                )
-
-                output_path = os.path.join("results", "batch_outputs", output_name)
-                cv2.imwrite(output_path, result_image)
-
-                results.append({
-                    "image": os.path.basename(image_path),
-                    "implementation": implementation,
-                    "time": execution_time,
-                    "edge_pixels": int(np.count_nonzero(edges)),
-                    "height": image.shape[0],
-                    "width": image.shape[1],
-                    "accumulator_shape": str(accumulator.shape),
-                    "max_votes": int(accumulator.max()),
-                    "detected_lines": detected_lines,
-                    "output_path": output_path
-                })
-
-            csv_path = os.path.join("results", "batch_selected_implementation.csv")
-            self.save_batch_csv(results, csv_path)
-
-            result_text = f"Batch processing completed.\nImplementation: {implementation}\nImages processed: {len(results)}\nCSV saved: {csv_path}\n\n"
-
-            for item in results:
-                result_text += (
-                    f"{item['image']} | "
-                    f"time={item['time']:.6f}s | "
-                    f"edges={item['edge_pixels']} | "
-                    f"lines={item['detected_lines']}\n"
-                )
-
-            self.write_results(result_text)
-
-            messagebox.showinfo("Done", f"Batch processing completed.\nCSV saved in:\n{csv_path}")
-
-        except Exception as error:
-            messagebox.showerror("Batch error", str(error))
-
-    def batch_benchmark_folder(self):
-        if self.folder_path is None:
-            messagebox.showerror("Error", "Please select a folder first.")
-            return
-
-        parameters = self.validate_parameters()
-        if parameters is None:
-            return
-
-        rho_res, theta_res, threshold = parameters
-        image_files = self.get_image_files(self.folder_path)
-
-        if not image_files:
-            messagebox.showerror("Error", "No image files found in selected folder.")
-            return
-
         benchmark_results = []
 
         try:
-            for image_path in image_files:
+            for index, image_path in enumerate(image_files, start=1):
+                self.safe_write_results(
+                    f"Running dataset benchmark...\n"
+                    f"Image {index}/{len(image_files)}: {os.path.basename(image_path)}"
+                )
+
                 image = load_grayscale_image(image_path)
                 edges = compute_edges(image)
 
@@ -550,17 +655,26 @@ class HoughGUI:
 
             os.makedirs("results", exist_ok=True)
 
-            csv_path = os.path.join("results", "batch_benchmark_seq_numba.csv")
+            csv_path = os.path.join("results", "dataset_benchmark_seq_numba.csv")
             self.save_benchmark_csv(benchmark_results, csv_path)
 
-            chart_path = os.path.join("results", "batch_benchmark_comparison.png")
-            self.create_batch_chart(benchmark_results, chart_path)
+            total_seq = sum(item["sequential_time"] for item in benchmark_results)
+            total_numba = sum(item["numba_time"] for item in benchmark_results)
+
+            total_speedup = total_seq / total_numba if total_numba > 0 else 0
+            cpu_count = os.cpu_count() if os.cpu_count() else 1
+            total_efficiency = total_speedup / cpu_count
 
             result_text = (
-                "Batch benchmark completed.\n"
+                f"Benchmark: Sequential Hough vs Numba Parallel Hough\n"
+                f"Mode: {self.mode_var.get()}\n"
                 f"Images processed: {len(benchmark_results)}\n"
-                f"CSV saved: {csv_path}\n"
-                f"Chart saved: {chart_path}\n\n"
+                f"CSV saved: {csv_path}\n\n"
+                f"Total Sequential time: {total_seq:.6f} seconds\n"
+                f"Total Numba time: {total_numba:.6f} seconds\n"
+                f"Total Speedup: {total_speedup:.2f}x\n"
+                f"Total Efficiency: {total_efficiency:.4f}\n"
+                f"CPU cores detected: {cpu_count}\n\n"
             )
 
             for item in benchmark_results:
@@ -572,46 +686,183 @@ class HoughGUI:
                     f"Efficiency={item['efficiency']:.4f}\n"
                 )
 
-            self.write_results(result_text)
-
-            messagebox.showinfo(
-                "Done",
-                f"Batch benchmark completed.\n\nCSV: {csv_path}\nChart: {chart_path}"
-            )
+            self.safe_write_results(result_text)
 
         except Exception as error:
-            messagebox.showerror("Batch benchmark error", str(error))
+            self.safe_message_error("Dataset benchmark error", str(error))
+
+    def generate_single_image_chart(self):
+        if self.image_path is None:
+            self.safe_message_error("Error", "Please select an image first.")
+            return
+
+        parameters = self.validate_parameters()
+
+        if parameters is None:
+            return
+
+        rho_res, theta_res, threshold = parameters
+
+        try:
+            image = load_grayscale_image(self.image_path)
+            edges = compute_edges(image)
+
+            _, _, _, seq_time = self.run_hough_algorithm(
+                "Sequential",
+                edges,
+                rho_res,
+                theta_res
+            )
+
+            _, _, _, numba_time = self.run_hough_algorithm(
+                "Numba Parallel",
+                edges,
+                rho_res,
+                theta_res
+            )
+
+            chart_path = os.path.join("results", "single_image_comparison_chart.png")
+
+            self.create_comparison_chart(
+                title="Single Image Benchmark",
+                labels=["Sequential Hough", "Numba Parallel Hough"],
+                sequential_times=[seq_time],
+                numba_times=[numba_time],
+                image_names=[os.path.basename(self.image_path)],
+                output_path=chart_path,
+                show_chart=True
+            )
+
+            speedup = seq_time / numba_time if numba_time > 0 else 0
+            cpu_count = os.cpu_count() if os.cpu_count() else 1
+            efficiency = speedup / cpu_count
+
+            result_text = (
+                "Single Image Chart generated.\n"
+                f"Chart saved: {chart_path}\n\n"
+                f"Sequential time: {seq_time:.6f} seconds\n"
+                f"Numba time: {numba_time:.6f} seconds\n"
+                f"Speedup: {speedup:.2f}x\n"
+                f"Efficiency: {efficiency:.4f}"
+            )
+
+            self.safe_write_results(result_text)
+
+        except Exception as error:
+            self.safe_message_error("Chart error", str(error))
+
+    def generate_dataset_chart(self):
+        parameters = self.validate_parameters()
+
+        if parameters is None:
+            return
+
+        image_files = self.get_current_dataset_images()
+
+        if image_files is None:
+            return
+
+        rho_res, theta_res, threshold = parameters
+        benchmark_results = []
+
+        try:
+            for index, image_path in enumerate(image_files, start=1):
+                self.safe_write_results(
+                    f"Generating dataset chart...\n"
+                    f"Image {index}/{len(image_files)}: {os.path.basename(image_path)}"
+                )
+
+                image = load_grayscale_image(image_path)
+                edges = compute_edges(image)
+
+                _, _, _, seq_time = self.run_hough_algorithm(
+                    "Sequential",
+                    edges,
+                    rho_res,
+                    theta_res
+                )
+
+                _, _, _, numba_time = self.run_hough_algorithm(
+                    "Numba Parallel",
+                    edges,
+                    rho_res,
+                    theta_res
+                )
+
+                benchmark_results.append({
+                    "image": os.path.basename(image_path),
+                    "sequential_time": seq_time,
+                    "numba_time": numba_time
+                })
+
+            image_names = [item["image"] for item in benchmark_results]
+            sequential_times = [item["sequential_time"] for item in benchmark_results]
+            numba_times = [item["numba_time"] for item in benchmark_results]
+
+            chart_path = os.path.join("results", "dataset_comparison_chart.png")
+
+            self.create_comparison_chart(
+                title=f"{self.mode_var.get()} Benchmark",
+                labels=["Sequential Hough", "Numba Parallel Hough"],
+                sequential_times=sequential_times,
+                numba_times=numba_times,
+                image_names=image_names,
+                output_path=chart_path,
+                show_chart=True
+            )
+
+            total_seq = sum(sequential_times)
+            total_numba = sum(numba_times)
+            speedup = total_seq / total_numba if total_numba > 0 else 0
+            cpu_count = os.cpu_count() if os.cpu_count() else 1
+            efficiency = speedup / cpu_count
+
+            result_text = (
+                f"Dataset Chart generated.\n"
+                f"Mode: {self.mode_var.get()}\n"
+                f"Images processed: {len(image_names)}\n"
+                f"Chart saved: {chart_path}\n\n"
+                f"Total Sequential time: {total_seq:.6f} seconds\n"
+                f"Total Numba time: {total_numba:.6f} seconds\n"
+                f"Total Speedup: {speedup:.2f}x\n"
+                f"Total Efficiency: {efficiency:.4f}"
+            )
+
+            self.safe_write_results(result_text)
+
+        except Exception as error:
+            self.safe_message_error("Dataset chart error", str(error))
 
     def create_comparison_chart(
         self,
-        image_name,
-        image_shape,
-        edge_pixels,
-        seq_time,
-        numba_time,
+        title,
+        labels,
+        sequential_times,
+        numba_times,
+        image_names,
         output_path,
         show_chart=True
     ):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+        total_seq = sum(sequential_times)
+        total_numba = sum(numba_times)
+
+        speedup = total_seq / total_numba if total_numba > 0 else 0
         cpu_count = os.cpu_count() if os.cpu_count() else 1
+        efficiency = speedup / cpu_count
 
-        numba_speedup = seq_time / numba_time if numba_time > 0 else 0
-        numba_efficiency = numba_speedup / cpu_count
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
-        implementations = ["Sequential Hough", "Numba Parallel Hough"]
-        execution_times = [seq_time, numba_time]
-        speedups = [1.0, numba_speedup]
-        efficiencies = [1.0, numba_efficiency]
+        implementations = labels
+        total_times = [total_seq, total_numba]
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        bars = axes[0, 0].bar(implementations, total_times)
+        axes[0, 0].set_title("Total Execution Time")
+        axes[0, 0].set_ylabel("Seconds")
 
-        bars1 = axes[0].bar(implementations, execution_times)
-        axes[0].set_title("Execution Time")
-        axes[0].set_ylabel("Seconds")
-
-        for bar, value in zip(bars1, execution_times):
-            axes[0].text(
+        for bar, value in zip(bars, total_times):
+            axes[0, 0].text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
                 f"{value:.4f}s",
@@ -619,38 +870,44 @@ class HoughGUI:
                 va="bottom"
             )
 
-        bars2 = axes[1].bar(implementations, speedups)
-        axes[1].set_title("Speedup")
-        axes[1].set_ylabel("x")
+        x = np.arange(len(image_names))
+        width = 0.35
 
-        for bar, value in zip(bars2, speedups):
-            axes[1].text(
+        axes[0, 1].bar(x - width / 2, sequential_times, width, label="Sequential")
+        axes[0, 1].bar(x + width / 2, numba_times, width, label="Numba")
+        axes[0, 1].set_title("Execution Time per Image")
+        axes[0, 1].set_ylabel("Seconds")
+        axes[0, 1].set_xticks(x)
+        axes[0, 1].set_xticklabels(image_names, rotation=30, ha="right")
+        axes[0, 1].legend()
+
+        bars_speedup = axes[1, 0].bar(["Speedup"], [speedup])
+        axes[1, 0].set_title("Overall Speedup")
+        axes[1, 0].set_ylabel("x")
+
+        for bar in bars_speedup:
+            axes[1, 0].text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
-                f"{value:.2f}x",
+                f"{speedup:.2f}x",
                 ha="center",
                 va="bottom"
             )
 
-        bars3 = axes[2].bar(implementations, efficiencies)
-        axes[2].set_title("Efficiency")
-        axes[2].set_ylabel("Efficiency")
+        bars_eff = axes[1, 1].bar(["Efficiency"], [efficiency])
+        axes[1, 1].set_title("Overall Efficiency")
+        axes[1, 1].set_ylabel("Efficiency")
 
-        for bar, value in zip(bars3, efficiencies):
-            axes[2].text(
+        for bar in bars_eff:
+            axes[1, 1].text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
-                f"{value:.4f}",
+                f"{efficiency:.4f}",
                 ha="center",
                 va="bottom"
             )
 
-        fig.suptitle(
-            "Hough Transform Benchmark: Sequential vs Numba Parallel\n"
-            f"Image: {image_name} | Size: {image_shape} | "
-            f"Edge pixels: {edge_pixels} | CPU cores: {cpu_count}",
-            fontsize=14
-        )
+        fig.suptitle(title, fontsize=16)
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
@@ -660,66 +917,52 @@ class HoughGUI:
         else:
             plt.close()
 
-        result_text = (
-            "Single image comparison chart generated.\n"
-            f"Chart saved: {output_path}\n\n"
-            f"Sequential Hough time: {seq_time:.6f} seconds\n"
-            f"Numba Parallel Hough time: {numba_time:.6f} seconds\n"
-            f"Speedup: {numba_speedup:.2f}x\n"
-            f"Efficiency: {numba_efficiency:.4f}\n"
-            f"CPU cores detected: {cpu_count}"
-        )
+    def download_predefined_dataset(self):
+        dataset_name = self.dataset_var.get()
+        max_images = self.get_max_images()
 
-        self.write_results(result_text)
+        if max_images is None:
+            return
 
-    def create_batch_chart(self, benchmark_results, output_path):
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        try:
+            self.safe_write_results(
+                f"Downloading only {max_images} images from:\n"
+                f"{dataset_name}\n\n"
+                "This uses Kaggle API file-by-file download."
+            )
 
-        image_names = [item["image"] for item in benchmark_results]
-        sequential_times = [item["sequential_time"] for item in benchmark_results]
-        numba_times = [item["numba_time"] for item in benchmark_results]
-        speedups = [item["speedup"] for item in benchmark_results]
-        efficiencies = [item["efficiency"] for item in benchmark_results]
+            dataset_path = download_limited_images(dataset_name, max_images)
 
-        x = np.arange(len(image_names))
-        width = 0.35
+            self.folder_path = dataset_path
+            self.mode_var.set("Predefined Dataset")
 
-        fig, axes = plt.subplots(3, 1, figsize=(14, 14))
+            image_files = find_images_recursively(dataset_path)
 
-        axes[0].bar(x - width / 2, sequential_times, width, label="Sequential Hough")
-        axes[0].bar(x + width / 2, numba_times, width, label="Numba Parallel Hough")
-        axes[0].set_title("Execution Time per Image")
-        axes[0].set_ylabel("Seconds")
-        axes[0].set_xticks(x)
-        axes[0].set_xticklabels(image_names, rotation=30, ha="right")
-        axes[0].legend()
+            self.root.after(
+                0,
+                lambda: self.path_label.config(
+                    text=f"Loaded dataset subset: {dataset_name}\nPath: {dataset_path}",
+                    fg="black"
+                )
+            )
 
-        axes[1].bar(image_names, speedups)
-        axes[1].set_title("Speedup per Image")
-        axes[1].set_ylabel("Speedup")
-        axes[1].tick_params(axis="x", rotation=30)
+            result_text = (
+                f"Dataset subset downloaded successfully.\n"
+                f"Dataset: {dataset_name}\n"
+                f"Path: {dataset_path}\n"
+                f"Requested images: {max_images}\n"
+                f"Images found locally: {len(image_files)}\n\n"
+                f"All mode buttons now operate on this predefined dataset."
+            )
 
-        axes[2].bar(image_names, efficiencies)
-        axes[2].set_title("Efficiency per Image")
-        axes[2].set_ylabel("Efficiency")
-        axes[2].tick_params(axis="x", rotation=30)
+            self.safe_write_results(result_text)
 
-        fig.suptitle("Batch Benchmark: Sequential Hough vs Numba Parallel Hough", fontsize=15)
-
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300)
-        plt.show()
-
-    def get_image_files(self, folder_path):
-        valid_extensions = (".jpg", ".jpeg", ".png", ".bmp")
-
-        return [
-            os.path.join(folder_path, file_name)
-            for file_name in os.listdir(folder_path)
-            if file_name.lower().endswith(valid_extensions)
-        ]
+        except Exception as error:
+            self.safe_message_error("Dataset error", str(error))
 
     def save_batch_csv(self, results, csv_path):
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
         with open(csv_path, "w", newline="") as file:
             writer = csv.DictWriter(
                 file,
@@ -741,6 +984,8 @@ class HoughGUI:
             writer.writerows(results)
 
     def save_benchmark_csv(self, results, csv_path):
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
         with open(csv_path, "w", newline="") as file:
             writer = csv.DictWriter(
                 file,
