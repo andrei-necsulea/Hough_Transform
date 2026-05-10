@@ -1,4 +1,5 @@
 import tkinter as tk
+import matplotlib.pyplot as plt
 from tkinter import filedialog, messagebox
 import time
 import os
@@ -109,6 +110,14 @@ class HoughGUI:
             command=self.benchmark_seq_numba
         )
         benchmark_button.grid(row=1, column=0, columnspan=3, pady=10)
+
+        chart_button = tk.Button(
+            buttons_frame,
+            text="Generate Comparison Chart",
+            width=26,
+            command=self.generate_comparison_chart
+        )
+        chart_button.grid(row=2, column=0, columnspan=3, pady=10)
 
         clear_button = tk.Button(
             buttons_frame,
@@ -333,6 +342,111 @@ class HoughGUI:
         except Exception as error:
             messagebox.showerror("Benchmark error", str(error))
 
+
+    def generate_comparison_chart(self):
+        if self.image_path is None:
+            messagebox.showerror("Error", "Please select an image first.")
+            return
+
+        parameters = self.validate_parameters()
+
+        if parameters is None:
+            return
+
+        rho_res, theta_res, threshold = parameters
+
+        try:
+            image = load_grayscale_image(self.image_path)
+            edges = compute_edges(image)
+
+            # Numba warm-up
+            hough_lines_numba(edges, rho_res, theta_res)
+
+            start_seq = time.perf_counter()
+            seq_acc, seq_rhos, seq_thetas = hough_lines_sequential(
+                edges,
+                rho_res=rho_res,
+                theta_res=theta_res
+            )
+            end_seq = time.perf_counter()
+
+            start_numba = time.perf_counter()
+            numba_acc, numba_rhos, numba_thetas = hough_lines_numba(
+                edges,
+                rho_res,
+                theta_res
+            )
+            end_numba = time.perf_counter()
+
+            seq_time = end_seq - start_seq
+            numba_time = end_numba - start_numba
+
+            implementations = ["Sequential", "Numba"]
+            execution_times = [seq_time, numba_time]
+
+            speedups = [
+                1.0,
+                seq_time / numba_time if numba_time > 0 else 0
+            ]
+
+            cpu_count = os.cpu_count() if os.cpu_count() else 1
+
+            efficiencies = [
+                1.0,
+                speedups[1] / cpu_count
+            ]
+
+            os.makedirs("results", exist_ok=True)
+
+            output_path = os.path.join("results", "benchmark_comparison.png")
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+            axes[0].bar(implementations, execution_times)
+            axes[0].set_title("Execution Time")
+            axes[0].set_ylabel("Seconds")
+
+            axes[1].bar(implementations, speedups)
+            axes[1].set_title("Speedup")
+            axes[1].set_ylabel("x")
+
+            axes[2].bar(implementations, efficiencies)
+            axes[2].set_title("Efficiency")
+            axes[2].set_ylabel("Efficiency")
+
+            fig.suptitle(
+                f"Hough Transform Benchmark\n"
+                f"Image: {os.path.basename(self.image_path)}, "
+                f"Edge pixels: {np.count_nonzero(edges)}, "
+                f"Theta: {np.rad2deg(theta_res):.2f}°"
+            )
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=300)
+            plt.close()
+
+            result_text = (
+                "Comparison chart generated successfully.\n"
+                f"Saved chart: {output_path}\n\n"
+                f"Sequential time: {seq_time:.6f} seconds\n"
+                f"Numba time: {numba_time:.6f} seconds\n"
+                f"Numba speedup: {speedups[1]:.2f}x\n"
+                f"Numba efficiency: {efficiencies[1]:.4f}\n"
+                f"CPU cores detected: {cpu_count}"
+            )
+
+            self.result_text.config(state="normal")
+            self.result_text.delete("1.0", tk.END)
+            self.result_text.insert("1.0", result_text)
+            self.result_text.config(state="disabled")
+
+            messagebox.showinfo(
+                "Chart generated",
+                f"Comparison chart saved in:\n{output_path}"
+            )
+
+        except Exception as error:
+            messagebox.showerror("Chart error", str(error))
 
 
     def clear_results(self):
