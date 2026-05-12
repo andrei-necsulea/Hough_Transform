@@ -1,72 +1,73 @@
 from mpi4py import MPI
-import cv2
 import numpy as np
-import time
+import cv2
 import os
-from numba import njit, prange
+import time
 
-# --- Nivelul 2: Paralelizare de tip OpenMP folosind Numba ---
-@njit(parallel=True)
-def compute_local_accumulator(y_idxs, x_idxs, rhos_len, thetas, diagonal):
-    """
-    Fiecare proces MPI rulează această funcție. Numba folosește mai multe thread-uri 
-    (OpenMP în spate) pentru a procesa sub-setul de pixeli primit.
-    """
+from image_utils import load_grayscale_image, compute_edges, draw_detected_lines
+
+
+def compute_local_accumulator(y_idxs, x_idxs, rhos_len, thetas, diagonal, rho_res):
     accumulator = np.zeros((rhos_len, len(thetas)), dtype=np.int32)
+
     cos_t = np.cos(thetas)
     sin_t = np.sin(thetas)
 
-    # prange paralelizează această buclă pe mai multe thread-uri
-    for i in prange(len(x_idxs)):
+    for i in range(len(x_idxs)):
         x = x_idxs[i]
         y = y_idxs[i]
 
         for theta_idx in range(len(thetas)):
             rho = int(round(x * cos_t[theta_idx] + y * sin_t[theta_idx]))
-            rho_idx = rho + diagonal
-            
-            # ATENȚIE (Punct de discuție pentru proiect): 
-            # Aici poate apărea un 'Race Condition' între thread-urile din Numba 
-            # dacă încearcă să modifice aceeași celulă simultan.
-            accumulator[rho_idx, theta_idx] += 1
+            rho_idx = int((rho + diagonal) / rho_res)
+
+            if 0 <= rho_idx < rhos_len:
+                accumulator[rho_idx, theta_idx] += 1
 
     return accumulator
 
-# --- Nivelul 1: Paralelizare MPI ---
+
 def main():
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
+    image_path = "data/images/h1.png"
     rho_res = 1
     theta_res = np.pi / 180
+    threshold = 120
 
     image_shape = None
     y_idxs = None
     x_idxs = None
 
-    # Procesul ROOT (Rank 0) citește imaginea și extrage muchiile
     if rank == 0:
-        image_path = "data/images/h1.png"
         if not os.path.exists(image_path):
-            print(f"[Rank 0] Imaginea nu a fost găsită: {image_path}")
+            print(f"Image not found: {image_path}")
             comm.Abort()
 
-        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        edges = cv2.Canny(image, 50, 150)
-        
+        image = load_grayscale_image(image_path)
+        edges = compute_edges(image)
+
         y_idxs, x_idxs = np.nonzero(edges)
         image_shape = edges.shape
-        print(f"[Rank 0] Începem procesarea MPI ({size} procese). Pixeli de muchie: {len(x_idxs)}")
 
-    # 1. ROOT trimite (Broadcast) dimensiunile imaginii tuturor proceselor
+        print("===== MPI Hough Transform =====")
+        print(f"Processes: {size}")
+        print(f"Image: {image_path}")
+        print(f"Image size: {image_shape}")
+        print(f"Edge pixels: {len(x_idxs)}")
+
     image_shape = comm.bcast(image_shape, root=0)
+
     height, width = image_shape
     diagonal = int(np.ceil(np.sqrt(height ** 2 + width ** 2)))
-    rhos_len = 2 * diagonal + 1
+
+    rhos = np.arange(-diagonal, diagonal + 1, rho_res)
     thetas = np.arange(0, np.pi, theta_res)
 
-    # 2. Împărțim munca (Scatter): ROOT divide pixelii în mod egal pentru fiecare proces MPI
+    rhos_len = len(rhos)
+
     if rank == 0:
         y_chunks = np.array_split(y_idxs, size)
         x_chunks = np.array_split(x_idxs, size)
@@ -77,17 +78,20 @@ def main():
     local_y_idxs = comm.scatter(y_chunks, root=0)
     local_x_idxs = comm.scatter(x_chunks, root=0)
 
-    # Ne asigurăm că toate procesele au ajuns aici înainte de a porni cronometrul
     comm.Barrier()
-    start_time = time.time()
+    start_time = time.perf_counter()
 
-    # Fiecare proces MPI își calculează acumulatorul local folosind Numba (Multi-threading)
     local_accumulator = compute_local_accumulator(
-        local_y_idxs, local_x_idxs, rhos_len, thetas, diagonal
+        local_y_idxs,
+        local_x_idxs,
+        rhos_len,
+        thetas,
+        diagonal,
+        rho_res
     )
 
-    # 3. Combinăm rezultatele (Reduce): Însumăm acumulatoarele locale într-unul global pe Rank 0
     global_accumulator = np.zeros_like(local_accumulator)
+
     comm.Reduce(
         [local_accumulator, MPI.INT],
         [global_accumulator, MPI.INT],
@@ -96,15 +100,30 @@ def main():
     )
 
     comm.Barrier()
-    end_time = time.time()
+    end_time = time.perf_counter()
 
-    # ROOT afișează rezultatele finale
     if rank == 0:
         execution_time = end_time - start_time
-        print(f"\n===== Rezultate Hibrid MPI + OpenMP =====")
-        print(f"Procese MPI utilizate: {size}")
-        print(f"Timp de execuție: {execution_time:.6f} secunde")
-        print(f"Voturi maxime în acumulator: {global_accumulator.max()}")
+
+        os.makedirs("results", exist_ok=True)
+
+        result_image, detected_lines = draw_detected_lines(
+            image,
+            global_accumulator,
+            rhos,
+            thetas,
+            threshold
+        )
+
+        output_path = "results/mpi_detected_lines.jpg"
+        cv2.imwrite(output_path, result_image)
+
+        print(f"Accumulator size: {global_accumulator.shape}")
+        print(f"Execution time: {execution_time:.6f} seconds")
+        print(f"Max votes: {global_accumulator.max()}")
+        print(f"Detected lines: {detected_lines}")
+        print(f"Saved result: {output_path}")
+
 
 if __name__ == "__main__":
     main()
