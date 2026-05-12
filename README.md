@@ -72,7 +72,7 @@ Aplicatia GUI permite:
 
 Fisier: [src/benchmark/benchmark_seq_numba.py](src/benchmark/benchmark_seq_numba.py)
 
-Benchmark-ul existent compara varianta secventiala cu varianta Numba si salveaza rezultatele in CSV.
+Benchmark-ul de baza compara varianta secventiala cu varianta Numba si salveaza rezultatele in CSV. In rularea extinsa a proiectului au fost comparate si implementarea MPI, respectiv varianta hibrida MPI + Numba, atat pentru o singura imagine, cat si pentru un folder cu 25 de imagini.
 
 Metricile urmarite in proiect sunt:
 
@@ -81,6 +81,55 @@ Metricile urmarite in proiect sunt:
 - eficienta: $E = S / P$, unde $P$ este numarul de thread-uri sau procese;
 - cost de sincronizare al acumulatorului;
 - impactul rezolutiei acumulatorului Hough asupra timpului si memoriei.
+
+Pentru interpretarea rezultatelor, este important de observat ca speedup-urile foarte mari ale Numba si ale variantei hibride includ si eliminarea overhead-ului Python prin JIT. Din acest motiv, cifrele trebuie citite impreuna cu timpul absolut, nu doar ca raport fata de varianta secventiala.
+
+### Rezultate experimentale extinse
+
+#### 1. Single image: h1.png
+
+Pe imaginea de test individuala, cu 5331 pixeli de muchie si acumulator de forma (1401, 180), s-au obtinut urmatoarele rezultate:
+
+- Sequential: 1.620921 s
+- Numba Parallel: 0.000723 s
+- MPI, 2 procese: 0.811546 s
+- Hybrid MPI + Numba, 2 procese: 0.001916 s
+- MPI, 4 procese: 0.431147 s
+- Hybrid MPI + Numba, 4 procese: 0.001929 s
+
+Concluzii pentru o singura imagine:
+
+- Numba Parallel: 2242.25x speedup, eficienta 140.1405
+- MPI, 2 procese: 2.00x speedup, eficienta 0.9987
+- Hybrid MPI + Numba, 2 procese: 845.99x speedup, eficienta 422.9961
+- MPI, 4 procese: 3.76x speedup, eficienta 0.9399
+- Hybrid MPI + Numba, 4 procese: 840.29x speedup, eficienta 210.0727
+
+Observatie practica: MPI scaleaza aproape liniar de la 2 la 4 procese pe aceasta masina, dar ramane mult mai lent decat Numba din cauza overhead-ului de comunicare, scatter si reduce. Varianta Numba si varianta hibrida par supra-liniare deoarece timpul secvential include overhead-ul Python, iar partea compilata JIT este masurata separat.
+
+#### 2. Batch folder: 25 imagini
+
+Pentru procesarea folderului de date, s-au obtinut urmatoarele valori agregate:
+
+- Sequential: 193.118799 s total, 7.724752 s/ imagine
+- MPI: 104.778244 s total, 4.191130 s/ imagine
+- Hybrid MPI + Numba: 0.119396 s total, 0.004776 s/ imagine
+- Numba Parallel: 0.080625 s total, 0.003225 s/ imagine
+
+Speedup total fata de Sequential:
+
+- MPI: 1.84x
+- Hybrid MPI + Numba: 1617.46x
+- Numba Parallel: 2395.27x
+
+Interval observat pentru imaginile din batch:
+
+- pixeli de muchie: 8601 - 54125 pe imagine;
+- timpi MPI: 1.325016 s - 8.002854 s pe imagine;
+- timpi Hybrid MPI + Numba: 0.001655 s - 0.007668 s pe imagine;
+- timpi Numba Parallel: 0.001954 s - 0.004272 s pe imagine.
+
+Pentru aceste imagini, acumulatorul Hough a ramas de forma (1159, 180) la rezolutia folosita in benchmark (`rho_res=1`, `theta_res=π/180`), ceea ce a mentinut comparatia consistenta intre implementari.
 
 Pentru analiza finala, este recomandat sa se testeze mai multe configuratii:
 
@@ -94,29 +143,34 @@ Pentru analiza finala, este recomandat sa se testeze mai multe configuratii:
 Proiectul utilizeaza 5 resurse de date:
 
 ### 1. Imagine de test inițială
+
 - **Path**: [data/images/h1.png](data/images/h1.png)
 - **Scop**: Imagine de test rapid pentru debugging și validare rapidă
 - **Utilizare**: Benchmark single-image cu rezultate cunoscute
 
 ### 2. BSDS500 (Berkeley Segmentation Dataset)
+
 - **Path**: [data/images/BSR/](data/images/BSR/)
 - **Descriere**: Dataset standard pentru evaluarea algoritmilor de detecție de contur și segmentare
 - **Relevanță**: Conține imaginea cu margini bine definite, ideale pentru testarea Transformatei Hough
 - **Source**: Berkeley Vision and Learning Center
 
 ### 3. Road Lane Detection Dataset
+
 - **Path**: [data/images/road_lane_detection_dataset/](data/images/road_lane_detection_dataset/)
 - **Descriere**: Imagini de drumuri cu lini de marcaj (lane markers)
 - **Relevanță**: Aplicație practică a Transformatei Hough - detecția liniilor în imagini de conducere autonomă
 - **Tip de linii**: Linii paralele și linii de intersecție
 
 ### 4. Massachusetts Buildings Dataset
+
 - **Path**: [datasets/massachusetts_buildings_dataset/](datasets/massachusetts_buildings_dataset/)
 - **Descriere**: Imagini aeriene cu clădiri și contururi pe hartă
 - **Relevanță**: Detecția marginilor clădirilor și a liniilor structurale în imagini de rezoluție înaltă
 - **Scop**: Analiza performanței pe imagini cu structuri geometrice complexe
 
 ### 5. TuSimple Lane Detection Dataset
+
 - **Path**: [datasets/tusimple_lane_detection_dataset/](datasets/tusimple_lane_detection_dataset/)
 - **Descriere**: Dataset industri pentru detecția de linii în conducerea autonomă
 - **Relevanță**: Imagini real-world cu condiții variate de iluminare și congestie
@@ -125,10 +179,11 @@ Proiectul utilizeaza 5 resurse de date:
 ### Statistica dataset-ului utilizat în benchmark:
 
 Din rezultatele obținute:
-- **20 imagini** au fost procesate din dataset
+
+- **25 imagini** au fost procesate din dataset
 - **Dimensiuni**: 321x481 sau 481x321 pixeli (imagini standard pentru procesare video)
-- **Pixeli de muchie**: 9,802 - 54,125 pixeli per imagine
-- **Acumulator**: Rezoluție constantă (1,159, 180) pentru toți pixelii
+- **Pixeli de muchie**: 8,601 - 54,125 pixeli per imagine
+- **Acumulator**: Rezoluție constantă (1,159, 180) pentru imaginile din batch; pe h1.png, forma este (1,401, 180)
 
 ### Relevanță pentru Transformata Hough:
 
@@ -266,41 +321,31 @@ Numarul de procese poate fi modificat pentru analiza scalabilitatii.
 - Numba
 - mpi4py
 
-## Ce trebuie discutat in raport
-
-Raportul scris ar trebui sa includa:
-
-- o descriere scurta a algoritmului si a rolului sau in procesarea imaginilor;
-- strategiile de paralelizare implementate;
-- comparatia intre implementarea secventiala si cele paralele;
-- configuratia hardware si software utilizata;
-- interpretarea personala a rezultatelor, nu doar tabele cu timpi.
-
-Pentru aceasta tema, este important sa discuti si urmatoarele aspecte:
+# Observatii
 
 ### 1. Acumulatorul Hough ca punct critic de sincronizare
 
-Transformata Hough se bazează pe o structură comună de date (acumulatorul), unde fiecare pixel de muchie contribuie la mai multe celule. În varianta secvențială, aceasta nu este o problemă. Totuși, în varianta paralelă cu Numba/OpenMP, mai multe thread-uri pot încerca să acceseh și să modifice aceeași celulă a acumulatorului simultan, ceea ce ar putea duce la **race conditions**. 
+Transformata Hough se bazează pe o structură comună de date (acumulatorul), unde fiecare pixel de muchie contribuie la mai multe celule. În varianta secvențială, această scriere este simplă. În varianta paralelă, diferența dintre timpi arată că overhead-ul dominant nu este doar actualizarea acumulatorului, ci și costul de execuție Python și, pentru MPI, costul de comunicare.
 
-Rezultatele experimentale arată că implementarea Numba gestionează efectiv acest aspect printr-o combinație de:
-- Utilizare de operații atomice implícite în backend-ul Numba
-- Reordonarea buclelor pentru a maximiza localitatea datelor
-- Minimizarea conflictelor prin distribuția inteligentă a încărcării
+Pe datele măsurate aici:
 
-Din datele benchmark-ului pe dataset-ul complet, se observă speedup-uri între **1612x și 3922x**, cu eficiență de **100% până la 245%**, indicând că sincronizarea nu introduce overhead semnificativ în cazul unei arhitecturi moderne cu cache-uri L3 mari (CPU-ul AMD Ryzen 7 are 8 nuclee / 16 thread-uri).
+- Numba Parallel ajunge la 2242.25x speedup pe o singură imagine;
+- Hybrid MPI + Numba rămâne foarte rapid, dar sub Numba pur, cu 845.99x la 2 procese și 840.29x la 4 procese;
+- MPI singur este aproape liniar între 2 și 4 procese, dar rămâne departe de performanța thread-urilor compilate, cu doar 2.00x și 3.76x speedup pe h1.png.
 
 ### 2. Impactul rezoluției acumulatorului Hough asupra performanței
 
 În experiment, rezoluția acumulatorului a fost fixată la o formă constantă de **(1159, 180)** pentru toate imaginile din dataset, corespunzând unui `rho_res=1` și `theta_res=π/180` (1 grad).
 
 Observații cheie:
-- Pentru imagini cu **mai mulți pixeli de muchie** (54,125 pixeli în cazul 108004.jpg), acumulatorul trebuie incrementat de mai multe ori, dar speedup-ul rămâne similar (3874x).
-- Rezoluția mai fină ar duce la un acumulator mai mare și potentially mai mult timp de acces la memorie, dar nu a fost testată în detailiu.
+
+- Pentru imagini cu **mai mulți pixeli de muchie** (54,125 pixeli în cazul 108004.jpg), timpul crește, dar imaginea rămâne în același ordin de mărime pentru implementările paralele; de exemplu, pe batch, MPI variază între 1.325016 s și 8.002854 s, iar Numba între 0.001954 s și 0.004272 s.
+- Rezoluția mai fină ar duce la un acumulator mai mare și, probabil, la mai mult timp de acces la memorie, dar acest compromis nu a fost măsurat aici.
 - Rezoluția mai grosieră ar putea crește **false positives** (suprapunere de linii în spatiul parametrilor).
 
 ### 3. Scalabilitatea speedup-ului cu numărul de thread-uri
 
-CPU-ul utilizat are **16 thread-uri logice (8 nuclee fizice)**. Speedup-ul observat este **1952x pe o singură imagine și 1612x-3922x pe dataset**. Aceasta depășeste mult 16x, ceea ce ar fi speedup-ul teoretic maxim într-o paralelizare perfectă.
+CPU-ul utilizat are **16 thread-uri logice (8 nuclee fizice)**. Speedup-ul observat este **2242.25x pe o singură imagine** și **1617.46x - 2395.27x pe batch**, în funcție de implementare. Aceste valori depășesc mult 16x, deci ele nu reflectă doar paralelizare brută, ci și eliminarea overhead-ului Python prin Numba și efectul de compilare JIT.
 
 Cauze posibile ale acestui speedup extraordinar:
 
@@ -312,11 +357,12 @@ Cauze posibile ale acestui speedup extraordinar:
 ### 4. Overhead-ul de comunicare în cazul MPI
 
 Implementarea MPI+OpenMP din cod include:
+
 - **Broadcast**: Dimensiunile imaginii sunt trimise tuturor proceselor.
 - **Scatter**: Pixelii de muchie sunt distribuiți în mod egal între procese.
 - **Reduce**: Acumulatoarele locale sunt însumate la procesul root.
 
-În scenariile cu procese pe un singur nod, costul de comunicare este destul de mic (pipe-uri inter-proces sau memoria partajată). Totuși, dacă procesele ar fi distribuite pe mai multe noduri (cluster), latența de rețea ar deveni dominantă. Studii asupra cluster-elor arată că break-even-ul pentru MPI vs thread-uri apare la zeci de megaocteți de date, iar setul de date Hough este relativ mic (pixeli de muchie + acumulator).
+În scenariile cu procese pe un singur nod, costul de comunicare este vizibil mai mare decât la thread-uri. Acest lucru se vede direct în cifre: pe h1.png, MPI cu 2 procese are 0.811546 s, iar cu 4 procese 0.431147 s, în timp ce Numba rămâne la 0.000723 s. Pe batch, MPI totalizează 104.778244 s, față de 0.119396 s pentru varianta hibridă și 0.080625 s pentru Numba. Dacă procesele ar fi distribuite pe mai multe noduri, latența de rețea ar deveni și mai relevantă.
 
 ### 5. Scenario-uri în care varianta hibridă (MPI + OpenMP) poate depăși varianta doar cu thread-uri
 
@@ -326,7 +372,7 @@ Varianta hibridă este benefică în situații precum:
 - **Echilibrare de sarcină**: MPI poate distribui munca mai bine dacă fiecare proces are mașini heterogene.
 - **Evitarea congestiei memoria**: O singură mașină cu 16 thread-uri poate fi limitată de lățimea de bandă a memoriei. MPI pe mai multe noduri oferă lățime de bandă distribuită.
 
-Totuși, pentru imagini de dimensiune standard (321x481 pixeli), varianta Numba cu thread-uri locale este mai simplă și suficientă.
+Totuși, pentru imaginile testate aici, varianta Numba cu thread-uri locale este cea mai rapidă pe aceeași mașină, iar hibridul rămâne mai degrabă util ca punct de extensie pentru cluster-e, nu ca soluție optimă pe un singur nod.
 
 ## Branch-uri si livrabile finale
 
@@ -342,56 +388,56 @@ Livrabilele finale cerute sunt:
 
 ### Rezultate și concluzii principale
 
-Această implementare a demonstrat succesul paralelizării Transformatei Hough prin compararea sistematică a trei variante: secvențială, Numba/OpenMP și MPI+OpenMP.
+Această implementare a demonstrat succesul paralelizării Transformatei Hough prin compararea sistematică a patru variante relevante: secvențială, Numba/OpenMP, MPI și MPI+OpenMP.
 
 #### Performanța măsurată:
 
 **Benchmark single-image (h1.png - 5,331 pixeli de muchie):**
-- Sequential: 1.437 secunde
-- Numba: 0.0007 secunde
-- **Speedup: 1,952x** (efficiency: 122%)
 
-**Benchmark dataset (20 imagini cu 9,802-54,125 pixeli de muchie fiecare):**
-- Speedup-uri: 1,612x - 3,922x
-- Efficiency: 100% - 245%
-- Timp mediu Sequential: ~9.3 secunde
-- Timp mediu Numba: ~0.004 secunde
+- Sequential: 1.620921 secunde
+- Numba Parallel: 0.000723 secunde
+- MPI, 2 procese: 0.811546 secunde
+- Hybrid MPI + Numba, 2 procese: 0.001916 secunde
+- MPI, 4 procese: 0.431147 secunde
+- Hybrid MPI + Numba, 4 procese: 0.001929 secunde
+
+**Batch folder (25 imagini cu 8,601-54,125 pixeli de muchie fiecare):**
+
+- Sequential: 193.118799 secunde total, 7.724752 secunde/imagine
+- Numba Parallel: 0.080625 secunde total, 0.003225 secunde/imagine
+- MPI: 104.778244 secunde total, 4.191130 secunde/imagine
+- Hybrid MPI + Numba: 0.119396 secunde total, 0.004776 secunde/imagine
+- Speedup total Numba: 2395.27x
+- Speedup total Hybrid: 1617.46x
+- Speedup total MPI: 1.84x
 
 #### Insight-uri importante:
 
-1. **Compilarea JIT elimină overhead-ul Python**: Numba compilează codul la nivel de mașină, éliminând interpretarea Python și permițând optimizări care nu sunt posibile în Python pur. Acesta este motivul principal pentru speedup-ul extraordinar.
-
-2. **Race conditions sunt gestionate eficient**: Deși acumulatorul Hough este o resursă partajată, Numba gestionează sincronizarea implicit fără overhead observabil. Arhitectura moderă cu cache-uri mari și branch prediction reduc semnificativ impactul conflictelor.
-
-3. **Scalabilitate super-liniară**: Speedup-ul depășește numărul de thread-uri (16), indicând că:
-   - Caching-ul este mai eficient în paralel
-   - Vectorizarea automată contribuie semnificativ
-   - Memoria pe nuclee este accesată mai local
-
-4. **Dataset consistency**: Variația speedup-ului pe dataset (1,612x - 3,922x) este mic (<2.4x), sugering că scalabilitatea este robustă indiferent de conținutul imaginii și numărul de pixeli de muchie.
+1. **Compilarea JIT elimină overhead-ul Python**: diferența dintre 1.620921 s și 0.000723 s pe h1.png arată că o mare parte din costul secvențial vine din execuția Python, nu doar din algoritm.
+2. **MPI pe un singur nod are overhead vizibil**: rezultatul de 0.811546 s la 2 procese și 0.431147 s la 4 procese confirmă că distribuirea muncii ajută, dar nu poate concura cu thread-urile compilate când datele sunt mici.
+3. **Scalabilitatea este clară, dar diferită pe fiecare implementare**: MPI trece de la 2.00x la 3.76x când dublezi numărul de procese, în timp ce Numba și hybrid rămân în zona de timp foarte mic, dominată de compilare, cache și overhead minim în secțiunea măsurată.
+4. **Batch-ul confirmă diferența dintre MPI și thread-uri compilate**: pe 25 de imagini, Numba este de 2395.27x mai rapid decât secvențial, hybrid-ul de 1617.46x, iar MPI de doar 1.84x.
 
 #### Limitări și direcții viitoare:
 
-1. **MPI nu a fost testat pe cluster real**: Implementarea MPI este prezentă, dar testele practice au fost doar pe o singură mașină. Pe un cluster real, comunicarea ar introduce latență semnificativă.
-
-2. **Rezoluția acumulatorului este fixă**: O studiu complet ar include variații ale `rho_res` și `theta_res` pentru a analiza trade-off-ul între acuratețe și performanță.
-
-3. **Puterea GPU nu a fost exploatată**: NVIDIA RTX 4060 din sistem ar putea accelera și mai mult Hough Transform-ul prin CUDA (Numba suportă target='cuda').
-
-4. **Thread pinning și NUMA**: Pe sisteme NUMA (Non-Uniform Memory Access), pinning-ul thread-urilor la anumite nuclee ar putea îmbunătăți performanța ulteriori.
+1. **MPI nu a fost testat pe cluster real**: implementarea MPI este prezentă, dar testele practice au fost doar pe o singură mașină. Pe un cluster real, comunicarea ar introduce latență semnificativă.
+2. **Rezoluția acumulatorului este fixă**: un studiu complet ar include variații ale `rho_res` și `theta_res` pentru a analiza trade-off-ul între acuratețe și performanță.
+3. **Puterea GPU nu a fost exploatată**: NVIDIA RTX 4060 din sistem ar putea accelera și mai mult Hough Transform-ul prin CUDA (Numba suportă `target='cuda'`).
+4. **Thread pinning și NUMA**: pe sisteme NUMA (Non-Uniform Memory Access), pinning-ul thread-urilor la anumite nuclee ar putea îmbunătăți performanța ulterior.
 
 #### Aplicabilitate practică:
 
-Paralelizarea Transformatei Hough cu Numba/OpenMP este **extrem de eficace** pentru aplicații real-time:
-- Detecția de linii cu >1,000 FPS pe imagini standard
-- Scalabilitate foarte bună la mai multe thread-uri
-- Cod ușor de integrat în pipeline-uri existente Python
+Paralelizarea Transformatei Hough cu Numba/OpenMP este **extrem de eficace** pentru aplicații real-time pe aceeași mașină:
 
-MPI+OpenMP rămâne relevant pentru scenariile de calcul pe cluster-e, în special pentru imagini de mari dimensiuni sau rezoluții înalte ale acumulatorului.
+- detecția de linii este practic instantanee în varianta compilată;
+- scalabilitatea pe 25 de imagini rămâne foarte bună;
+- codul este ușor de integrat în pipeline-uri Python existente.
+
+MPI+OpenMP rămâne relevant pentru scenariile de calcul pe cluster-e, în special pentru imagini de mari dimensiuni sau rezoluții înalte ale acumulatorului, unde costul de comunicare poate fi amortizat de volum.
 
 ### Concluzii finale
 
-1. **Numba cu `@njit(parallel=True)` oferă un mod eficient și simplu de a paraleliza algoritmi legați de compute-bound pe CPU.**
-2. **Speedup-ul extraordinar (>1900x) demonstrează puterea compilării JIT combinată cu paralelizare thread-based și optimizări agresive.**
-3. **Sincronizarea acumulatorului Hough nu introduce overhead observabil în practice, chiar și cu 16 thread-uri konkurente.**
-4. **Pentru aplicații practice, varianta Numba este preferabilă MPI pe o singură mașină, dar MPI rămâne relevant pentru cluster-e distribuționate cu mii de procese.**
+1. **Numba cu `@njit(parallel=True)` oferă cea mai bună performanță pe aceeași mașină, cu 2242.25x pe o singură imagine și 2395.27x pe batch.**
+2. **MPI scalează corect între 2 și 4 procese, dar pe acest workload rămâne mult în urma variantelor compilate cu thread-uri.**
+3. **Varianta hibridă este utilă arhitectural, dar pe o singură mașină nu depășește Numba pur.**
+4. **Pentru această implementare și acest set de date, factorul decisiv nu este doar numărul de procese/thread-uri, ci și costul efectiv al execuției Python versus cod compilat.**
