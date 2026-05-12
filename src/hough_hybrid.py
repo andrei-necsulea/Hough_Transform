@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 import os
 import time
+import sys
 
 from image_utils import load_grayscale_image, compute_edges, draw_detected_lines
 
@@ -34,7 +35,7 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    image_path = "data/images/h1.png"
+    image_path = sys.argv[1] if len(sys.argv) > 1 else "data/images/h1.png"
     rho_res = 1
     theta_res = np.pi / 180
     threshold = 120
