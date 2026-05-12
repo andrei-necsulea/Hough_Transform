@@ -5,6 +5,10 @@ import os
 import csv
 import threading
 
+import subprocess
+import sys
+import re
+
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
@@ -70,7 +74,9 @@ class HoughGUI:
             implementation_frame,
             self.implementation_var,
             "Sequential",
-            "Numba Parallel"
+            "Numba Parallel",
+            "MPI",
+            "Hybrid MPI + Numba"
         )
         implementation_menu.config(width=22)
         implementation_menu.pack()
@@ -148,6 +154,11 @@ class HoughGUI:
         self.threshold_entry = tk.Entry(params_frame, width=12)
         self.threshold_entry.insert(0, "120")
         self.threshold_entry.grid(row=2, column=1, padx=8, pady=6)
+
+        tk.Label(params_frame, text="MPI processes:").grid(row=3, column=0, padx=8, pady=6, sticky="e")
+        self.mpi_processes_entry = tk.Entry(params_frame, width=12)
+        self.mpi_processes_entry.insert(0, "2")
+        self.mpi_processes_entry.grid(row=3, column=1, padx=8, pady=6)
 
         buttons_frame = tk.Frame(self.root)
         buttons_frame.pack(pady=12)
@@ -266,6 +277,19 @@ class HoughGUI:
         except ValueError:
             messagebox.showerror("Invalid value", "Max images must be a positive integer.")
             return None
+    
+    def get_mpi_processes(self):
+        try:
+            processes = int(self.mpi_processes_entry.get())
+
+            if processes <= 0:
+                raise ValueError
+
+            return processes
+
+        except ValueError:
+            messagebox.showerror("Invalid value", "MPI processes must be a positive integer.")
+            return None
 
     def write_results(self, text):
         self.result_text.config(state="normal")
@@ -367,6 +391,68 @@ class HoughGUI:
             raise ValueError("Unknown implementation selected.")
 
         return accumulator, rhos, thetas, end_time - start_time
+    
+    def extract_execution_time(self, output):
+        match = re.search(r"Execution time:\s*([0-9.]+)", output)
+
+        if match:
+            return float(match.group(1))
+
+        return None
+
+
+    def run_mpi_external(self, implementation, image_path):
+        processes = self.get_mpi_processes()
+
+        if processes is None:
+            return None
+
+        if implementation == "MPI":
+            script_path = os.path.join("src", "hough_mpi.py")
+
+        elif implementation == "Hybrid MPI + Numba":
+            script_path = os.path.join("src", "hough_hybrid.py")
+
+        else:
+            raise ValueError("Invalid MPI implementation.")
+
+        command = [
+            "mpiexec",
+            "-n",
+            str(processes),
+            sys.executable,
+            script_path,
+            image_path
+        ]
+
+        env = os.environ.copy()
+        env["NUMBA_NUM_THREADS"] = "2"
+        env["OMP_NUM_THREADS"] = "2"
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=180
+        )
+
+        output = result.stdout + result.stderr
+        execution_time = self.extract_execution_time(output)
+
+        if execution_time is None:
+            raise RuntimeError(
+                "Could not extract execution time from MPI output.\n\n"
+                f"Command:\n{' '.join(command)}\n\n"
+                f"Output:\n{output}"
+            )
+
+        return {
+            "implementation": implementation,
+            "processes": processes,
+            "execution_time": execution_time,
+            "output": output
+        }
 
     def run_single_image(self):
         if self.image_path is None:
@@ -380,6 +466,31 @@ class HoughGUI:
 
         rho_res, theta_res, threshold = parameters
         implementation = self.implementation_var.get()
+
+        if implementation in ["MPI", "Hybrid MPI + Numba"]:
+            try:
+                result = self.run_mpi_external(implementation, self.image_path)
+
+                if result is None:
+                    return
+
+                result_text = (
+                    f"Mode: Single Image\n"
+                    f"Implementation: {implementation}\n"
+                    f"MPI processes: {result['processes']}\n"
+                    f"Execution time: {result['execution_time']:.6f} seconds\n"
+                    f"Image: {os.path.basename(self.image_path)}\n\n"
+                    f"Raw MPI output:\n{result['output']}"
+                )
+
+                self.safe_write_results(result_text)
+                self.safe_message_info("Done", f"{implementation} completed successfully.")
+
+                return
+
+            except Exception as error:
+                self.safe_message_error("MPI execution error", str(error))
+                return
 
         try:
             image = load_grayscale_image(self.image_path)
@@ -478,6 +589,24 @@ class HoughGUI:
                 image = load_grayscale_image(image_path)
                 edges = compute_edges(image)
 
+                if implementation in ["MPI", "Hybrid MPI + Numba"]:
+                    result = self.run_mpi_external(implementation, image_path)
+
+                    results.append({
+                        "image": os.path.basename(image_path),
+                        "implementation": implementation,
+                        "time": result["execution_time"],
+                        "edge_pixels": int(np.count_nonzero(edges)),
+                        "height": image.shape[0],
+                        "width": image.shape[1],
+                        "accumulator_shape": "computed by external MPI script",
+                        "max_votes": -1,
+                        "detected_lines": -1,
+                        "output_path": "saved by external MPI script"
+                    })
+
+                    continue
+
                 accumulator, rhos, thetas, execution_time = self.run_hough_algorithm(
                     implementation,
                     edges,
@@ -495,7 +624,7 @@ class HoughGUI:
 
                 output_name = (
                     f"{os.path.splitext(os.path.basename(image_path))[0]}_"
-                    f"{implementation.lower().replace(' ', '_')}.jpg"
+                    f"{implementation.lower().replace(' ', '_').replace('+', 'plus')}.jpg"
                 )
 
                 output_path = os.path.join(output_dir, output_name)
@@ -539,7 +668,10 @@ class HoughGUI:
                 )
 
             self.safe_write_results(result_text)
-            self.safe_message_info("Done", f"Dataset processing completed.\nCSV saved in:\n{csv_path}")
+            self.safe_message_info(
+                "Done",
+                f"Dataset processing completed.\nCSV saved in:\n{csv_path}"
+            )
 
         except Exception as error:
             self.safe_message_error("Dataset processing error", str(error))
@@ -574,12 +706,18 @@ class HoughGUI:
                 theta_res
             )
 
+            mpi_result = self.run_mpi_external("MPI", self.image_path)
+            hybrid_result = self.run_mpi_external("Hybrid MPI + Numba", self.image_path)
+
+            mpi_time = mpi_result["execution_time"]
+            hybrid_time = hybrid_result["execution_time"]
+
             speedup = seq_time / numba_time if numba_time > 0 else 0
             cpu_count = os.cpu_count() if os.cpu_count() else 1
             efficiency = speedup / cpu_count
 
             result_text = (
-                "Benchmark: Sequential Hough vs Numba Parallel Hough\n"
+                "Benchmark: All Implementations\n"
                 f"Mode: Single Image\n"
                 f"Image: {os.path.basename(self.image_path)}\n"
                 f"Image size: {image.shape}\n"
@@ -587,11 +725,18 @@ class HoughGUI:
                 f"Accumulator size: {seq_acc.shape}\n"
                 f"Rho resolution: {rho_res}\n"
                 f"Theta resolution: {np.rad2deg(theta_res):.2f} degrees\n\n"
+
                 f"Sequential Hough time: {seq_time:.6f} seconds\n"
                 f"Numba Parallel Hough time: {numba_time:.6f} seconds\n"
-                f"Speedup: {speedup:.2f}x\n"
-                f"Efficiency: {efficiency:.4f}\n"
-                f"CPU cores detected: {cpu_count}"
+                f"MPI Hough time: {mpi_time:.6f} seconds\n"
+                f"Hybrid MPI + Numba time: {hybrid_time:.6f} seconds\n\n"
+
+                f"Numba speedup: {seq_time / numba_time:.2f}x\n"
+                f"MPI speedup: {seq_time / mpi_time:.2f}x\n"
+                f"Hybrid speedup: {seq_time / hybrid_time:.2f}x\n\n"
+
+                f"CPU cores detected: {os.cpu_count()}\n"
+                f"MPI processes used: {mpi_result['processes']}"
             )
 
             self.safe_write_results(result_text)
@@ -616,7 +761,7 @@ class HoughGUI:
         try:
             for index, image_path in enumerate(image_files, start=1):
                 self.safe_write_results(
-                    f"Running dataset benchmark...\n"
+                    f"Running full dataset benchmark...\n"
                     f"Image {index}/{len(image_files)}: {os.path.basename(image_path)}"
                 )
 
@@ -637,9 +782,11 @@ class HoughGUI:
                     theta_res
                 )
 
-                speedup = seq_time / numba_time if numba_time > 0 else 0
-                cpu_count = os.cpu_count() if os.cpu_count() else 1
-                efficiency = speedup / cpu_count
+                mpi_result = self.run_mpi_external("MPI", image_path)
+                hybrid_result = self.run_mpi_external("Hybrid MPI + Numba", image_path)
+
+                mpi_time = mpi_result["execution_time"]
+                hybrid_time = hybrid_result["execution_time"]
 
                 benchmark_results.append({
                     "image": os.path.basename(image_path),
@@ -649,32 +796,37 @@ class HoughGUI:
                     "accumulator_shape": str(seq_acc.shape),
                     "sequential_time": seq_time,
                     "numba_time": numba_time,
-                    "speedup": speedup,
-                    "efficiency": efficiency
+                    "mpi_time": mpi_time,
+                    "hybrid_time": hybrid_time,
+                    "numba_speedup": seq_time / numba_time if numba_time > 0 else 0,
+                    "mpi_speedup": seq_time / mpi_time if mpi_time > 0 else 0,
+                    "hybrid_speedup": seq_time / hybrid_time if hybrid_time > 0 else 0
                 })
 
             os.makedirs("results", exist_ok=True)
 
-            csv_path = os.path.join("results", "dataset_benchmark_seq_numba.csv")
-            self.save_benchmark_csv(benchmark_results, csv_path)
+            csv_path = os.path.join("results", "dataset_benchmark_all.csv")
+            self.save_full_benchmark_csv(benchmark_results, csv_path)
 
             total_seq = sum(item["sequential_time"] for item in benchmark_results)
             total_numba = sum(item["numba_time"] for item in benchmark_results)
-
-            total_speedup = total_seq / total_numba if total_numba > 0 else 0
-            cpu_count = os.cpu_count() if os.cpu_count() else 1
-            total_efficiency = total_speedup / cpu_count
+            total_mpi = sum(item["mpi_time"] for item in benchmark_results)
+            total_hybrid = sum(item["hybrid_time"] for item in benchmark_results)
 
             result_text = (
-                f"Benchmark: Sequential Hough vs Numba Parallel Hough\n"
+                f"Benchmark: All Implementations\n"
                 f"Mode: {self.mode_var.get()}\n"
                 f"Images processed: {len(benchmark_results)}\n"
                 f"CSV saved: {csv_path}\n\n"
                 f"Total Sequential time: {total_seq:.6f} seconds\n"
                 f"Total Numba time: {total_numba:.6f} seconds\n"
-                f"Total Speedup: {total_speedup:.2f}x\n"
-                f"Total Efficiency: {total_efficiency:.4f}\n"
-                f"CPU cores detected: {cpu_count}\n\n"
+                f"Total MPI time: {total_mpi:.6f} seconds\n"
+                f"Total Hybrid time: {total_hybrid:.6f} seconds\n\n"
+                f"Numba Speedup: {total_seq / total_numba:.2f}x\n"
+                f"MPI Speedup: {total_seq / total_mpi:.2f}x\n"
+                f"Hybrid Speedup: {total_seq / total_hybrid:.2f}x\n\n"
+                f"CPU cores detected: {os.cpu_count()}\n"
+                f"MPI processes used: {self.get_mpi_processes()}\n\n"
             )
 
             for item in benchmark_results:
@@ -682,8 +834,8 @@ class HoughGUI:
                     f"{item['image']} | "
                     f"Seq={item['sequential_time']:.6f}s | "
                     f"Numba={item['numba_time']:.6f}s | "
-                    f"Speedup={item['speedup']:.2f}x | "
-                    f"Efficiency={item['efficiency']:.4f}\n"
+                    f"MPI={item['mpi_time']:.6f}s | "
+                    f"Hybrid={item['hybrid_time']:.6f}s\n"
                 )
 
             self.safe_write_results(result_text)
@@ -721,29 +873,35 @@ class HoughGUI:
                 theta_res
             )
 
-            chart_path = os.path.join("results", "single_image_comparison_chart.png")
+            mpi_result = self.run_mpi_external("MPI", self.image_path)
+            hybrid_result = self.run_mpi_external("Hybrid MPI + Numba", self.image_path)
+
+            mpi_time = mpi_result["execution_time"]
+            hybrid_time = hybrid_result["execution_time"]
+
+            chart_path = os.path.join("results", "single_image_all_implementations_chart.png")
 
             self.create_comparison_chart(
-                title="Single Image Benchmark",
-                labels=["Sequential Hough", "Numba Parallel Hough"],
+                title="Single Image Benchmark - All Implementations",
+                image_names=[os.path.basename(self.image_path)],
                 sequential_times=[seq_time],
                 numba_times=[numba_time],
-                image_names=[os.path.basename(self.image_path)],
+                mpi_times=[mpi_time],
+                hybrid_times=[hybrid_time],
                 output_path=chart_path,
                 show_chart=True
             )
 
-            speedup = seq_time / numba_time if numba_time > 0 else 0
-            cpu_count = os.cpu_count() if os.cpu_count() else 1
-            efficiency = speedup / cpu_count
-
             result_text = (
-                "Single Image Chart generated.\n"
+                "Single Image Chart generated for all implementations.\n"
                 f"Chart saved: {chart_path}\n\n"
                 f"Sequential time: {seq_time:.6f} seconds\n"
                 f"Numba time: {numba_time:.6f} seconds\n"
-                f"Speedup: {speedup:.2f}x\n"
-                f"Efficiency: {efficiency:.4f}"
+                f"MPI time: {mpi_time:.6f} seconds\n"
+                f"Hybrid time: {hybrid_time:.6f} seconds\n\n"
+                f"Numba speedup: {seq_time / numba_time:.2f}x\n"
+                f"MPI speedup: {seq_time / mpi_time:.2f}x\n"
+                f"Hybrid speedup: {seq_time / hybrid_time:.2f}x"
             )
 
             self.safe_write_results(result_text)
@@ -763,12 +921,17 @@ class HoughGUI:
             return
 
         rho_res, theta_res, threshold = parameters
-        benchmark_results = []
+
+        image_names = []
+        sequential_times = []
+        numba_times = []
+        mpi_times = []
+        hybrid_times = []
 
         try:
             for index, image_path in enumerate(image_files, start=1):
                 self.safe_write_results(
-                    f"Generating dataset chart...\n"
+                    f"Generating full dataset chart...\n"
                     f"Image {index}/{len(image_files)}: {os.path.basename(image_path)}"
                 )
 
@@ -789,43 +952,45 @@ class HoughGUI:
                     theta_res
                 )
 
-                benchmark_results.append({
-                    "image": os.path.basename(image_path),
-                    "sequential_time": seq_time,
-                    "numba_time": numba_time
-                })
+                mpi_result = self.run_mpi_external("MPI", image_path)
+                hybrid_result = self.run_mpi_external("Hybrid MPI + Numba", image_path)
 
-            image_names = [item["image"] for item in benchmark_results]
-            sequential_times = [item["sequential_time"] for item in benchmark_results]
-            numba_times = [item["numba_time"] for item in benchmark_results]
+                image_names.append(os.path.basename(image_path))
+                sequential_times.append(seq_time)
+                numba_times.append(numba_time)
+                mpi_times.append(mpi_result["execution_time"])
+                hybrid_times.append(hybrid_result["execution_time"])
 
-            chart_path = os.path.join("results", "dataset_comparison_chart.png")
+            chart_path = os.path.join("results", "dataset_all_implementations_chart.png")
 
             self.create_comparison_chart(
-                title=f"{self.mode_var.get()} Benchmark",
-                labels=["Sequential Hough", "Numba Parallel Hough"],
+                title=f"{self.mode_var.get()} Benchmark - All Implementations",
+                image_names=image_names,
                 sequential_times=sequential_times,
                 numba_times=numba_times,
-                image_names=image_names,
+                mpi_times=mpi_times,
+                hybrid_times=hybrid_times,
                 output_path=chart_path,
                 show_chart=True
             )
 
             total_seq = sum(sequential_times)
             total_numba = sum(numba_times)
-            speedup = total_seq / total_numba if total_numba > 0 else 0
-            cpu_count = os.cpu_count() if os.cpu_count() else 1
-            efficiency = speedup / cpu_count
+            total_mpi = sum(mpi_times)
+            total_hybrid = sum(hybrid_times)
 
             result_text = (
-                f"Dataset Chart generated.\n"
+                f"Dataset Chart generated for all implementations.\n"
                 f"Mode: {self.mode_var.get()}\n"
                 f"Images processed: {len(image_names)}\n"
                 f"Chart saved: {chart_path}\n\n"
                 f"Total Sequential time: {total_seq:.6f} seconds\n"
                 f"Total Numba time: {total_numba:.6f} seconds\n"
-                f"Total Speedup: {speedup:.2f}x\n"
-                f"Total Efficiency: {efficiency:.4f}"
+                f"Total MPI time: {total_mpi:.6f} seconds\n"
+                f"Total Hybrid time: {total_hybrid:.6f} seconds\n\n"
+                f"Numba speedup: {total_seq / total_numba:.2f}x\n"
+                f"MPI speedup: {total_seq / total_mpi:.2f}x\n"
+                f"Hybrid speedup: {total_seq / total_hybrid:.2f}x"
             )
 
             self.safe_write_results(result_text)
@@ -836,10 +1001,11 @@ class HoughGUI:
     def create_comparison_chart(
         self,
         title,
-        labels,
+        image_names,
         sequential_times,
         numba_times,
-        image_names,
+        mpi_times,
+        hybrid_times,
         output_path,
         show_chart=True
     ):
@@ -847,21 +1013,47 @@ class HoughGUI:
 
         total_seq = sum(sequential_times)
         total_numba = sum(numba_times)
+        total_mpi = sum(mpi_times)
+        total_hybrid = sum(hybrid_times)
 
-        speedup = total_seq / total_numba if total_numba > 0 else 0
+        implementations = [
+            "Sequential",
+            "Numba",
+            "MPI",
+            "Hybrid"
+        ]
+
+        total_times = [
+            total_seq,
+            total_numba,
+            total_mpi,
+            total_hybrid
+        ]
+
+        speedups = [
+            1.0,
+            total_seq / total_numba if total_numba > 0 else 0,
+            total_seq / total_mpi if total_mpi > 0 else 0,
+            total_seq / total_hybrid if total_hybrid > 0 else 0
+        ]
+
+        mpi_processes = self.get_mpi_processes() or 1
         cpu_count = os.cpu_count() if os.cpu_count() else 1
-        efficiency = speedup / cpu_count
 
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        efficiencies = [
+            1.0,
+            speedups[1] / cpu_count,
+            speedups[2] / mpi_processes,
+            speedups[3] / mpi_processes
+        ]
 
-        implementations = labels
-        total_times = [total_seq, total_numba]
+        fig, axes = plt.subplots(2, 2, figsize=(18, 12))
 
-        bars = axes[0, 0].bar(implementations, total_times)
+        bars_time = axes[0, 0].bar(implementations, total_times)
         axes[0, 0].set_title("Total Execution Time")
         axes[0, 0].set_ylabel("Seconds")
 
-        for bar, value in zip(bars, total_times):
+        for bar, value in zip(bars_time, total_times):
             axes[0, 0].text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
@@ -871,43 +1063,50 @@ class HoughGUI:
             )
 
         x = np.arange(len(image_names))
-        width = 0.35
+        width = 0.2
 
-        axes[0, 1].bar(x - width / 2, sequential_times, width, label="Sequential")
-        axes[0, 1].bar(x + width / 2, numba_times, width, label="Numba")
+        axes[0, 1].bar(x - 1.5 * width, sequential_times, width, label="Sequential")
+        axes[0, 1].bar(x - 0.5 * width, numba_times, width, label="Numba")
+        axes[0, 1].bar(x + 0.5 * width, mpi_times, width, label="MPI")
+        axes[0, 1].bar(x + 1.5 * width, hybrid_times, width, label="Hybrid")
+
         axes[0, 1].set_title("Execution Time per Image")
         axes[0, 1].set_ylabel("Seconds")
         axes[0, 1].set_xticks(x)
         axes[0, 1].set_xticklabels(image_names, rotation=30, ha="right")
         axes[0, 1].legend()
 
-        bars_speedup = axes[1, 0].bar(["Speedup"], [speedup])
+        bars_speedup = axes[1, 0].bar(implementations, speedups)
         axes[1, 0].set_title("Overall Speedup")
         axes[1, 0].set_ylabel("x")
 
-        for bar in bars_speedup:
+        for bar, value in zip(bars_speedup, speedups):
             axes[1, 0].text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
-                f"{speedup:.2f}x",
+                f"{value:.2f}x",
                 ha="center",
                 va="bottom"
             )
 
-        bars_eff = axes[1, 1].bar(["Efficiency"], [efficiency])
+        bars_efficiency = axes[1, 1].bar(implementations, efficiencies)
         axes[1, 1].set_title("Overall Efficiency")
         axes[1, 1].set_ylabel("Efficiency")
 
-        for bar in bars_eff:
+        for bar, value in zip(bars_efficiency, efficiencies):
             axes[1, 1].text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
-                f"{efficiency:.4f}",
+                f"{value:.4f}",
                 ha="center",
                 va="bottom"
             )
 
-        fig.suptitle(title, fontsize=16)
+        fig.suptitle(
+            f"{title}\n"
+            f"MPI processes: {mpi_processes}, CPU cores: {cpu_count}",
+            fontsize=16
+        )
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
@@ -999,6 +1198,32 @@ class HoughGUI:
                     "numba_time",
                     "speedup",
                     "efficiency"
+                ]
+            )
+
+            writer.writeheader()
+            writer.writerows(results)
+
+
+    def save_full_benchmark_csv(self, results, csv_path):
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
+        with open(csv_path, "w", newline="") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=[
+                    "image",
+                    "height",
+                    "width",
+                    "edge_pixels",
+                    "accumulator_shape",
+                    "sequential_time",
+                    "numba_time",
+                    "mpi_time",
+                    "hybrid_time",
+                    "numba_speedup",
+                    "mpi_speedup",
+                    "hybrid_speedup"
                 ]
             )
 
