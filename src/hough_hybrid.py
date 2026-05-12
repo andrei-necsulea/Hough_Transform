@@ -34,7 +34,7 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    image_path = "data/images/test.jpg"
+    image_path = "data/images/h1.png"
     rho_res = 1
     theta_res = np.pi / 180
     threshold = 120
